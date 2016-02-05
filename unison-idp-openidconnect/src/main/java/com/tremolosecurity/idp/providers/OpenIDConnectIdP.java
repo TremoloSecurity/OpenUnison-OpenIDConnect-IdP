@@ -84,7 +84,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	private MapIdentity mapper;
 	
 	public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
-		// TODO Auto-generated method stub
+
 
 	}
 
@@ -164,20 +164,14 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			} else {
 				if (authData.getAuthLevel() < act.getLevel()) {
 					//step up authentication, clear existing auth data
-					/*AuthController controller = ((AuthController) session.getAttribute(AuthSys.AUTH_CTL));
-					controller.setHolder(null);
-					for (AuthStep as : controller.getAuthSteps()) {
-						as.setExecuted(false);
-						as.setSuccess(false);
-					}*/
+
 					
 					session.removeAttribute(ProxyConstants.AUTH_CTL);
 					holder.getConfig().createAnonUser(session);
 					
 					nextAuth(request,response,session,false,act);
 				} else {
-					//chain.doFilter(req, resp);
-					//next.nextSys((HttpServletRequest) req, (HttpServletResponse) resp);
+					
 					StringBuffer b = genFinalURL(request);
 					response.sendRedirect(b.toString());
 					
@@ -193,7 +187,6 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	}
 	
 	private boolean nextAuth(HttpServletRequest req,HttpServletResponse resp,HttpSession session,boolean jsRedirect,AuthChainType act) throws ServletException, IOException {
-		//HttpSession session = req.getSession(true);
 		
 		RequestHolder reqHolder;
 		
@@ -225,12 +218,12 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	}
 
 	public void doHead(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
-		// TODO Auto-generated method stub
+
 
 	}
 
 	public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
-		// TODO Auto-generated method stub
+
 
 	}
 
@@ -378,7 +371,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	}
 	
 	public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
-		// TODO Auto-generated method stub
+	
 
 	}
 
