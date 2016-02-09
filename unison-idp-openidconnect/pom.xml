@@ -19,16 +19,41 @@
 	<version>1.0.6</version>
 	<name>unison-idp-openidconnect</name>
 	<url>http://maven.apache.org</url>
+	<build>
+		<plugins>
+			<plugin>
+
+				<artifactId>maven-assembly-plugin</artifactId>
+				<configuration>
+					<descriptors>
+						<descriptor>${project.basedir}/src/main/xml/create-distro.xml</descriptor>
+					</descriptors>
+
+				</configuration>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>single</goal>
+						</goals>
+
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
 	<dependencies>
 		<dependency>
 			<groupId>com.tremolosecurity.unison</groupId>
 			<artifactId>unison-server-core</artifactId>
 			<version>1.0.6</version>
+			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>com.tremolosecurity.unison</groupId>
 			<artifactId>unison-sdk</artifactId>
 			<version>1.0.6</version>
+			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>org.bitbucket.b_c</groupId>
