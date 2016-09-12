@@ -16,7 +16,7 @@
 	<groupId>com.tremolosecurity.unison</groupId>
 	<artifactId>unison-idp-openidconnect</artifactId>
 	<packaging>jar</packaging>
-	<version>1.0.6</version>
+	<version>1.0.7</version>
 	<name>unison-idp-openidconnect</name>
 	<url>http://maven.apache.org</url>
 	<build>

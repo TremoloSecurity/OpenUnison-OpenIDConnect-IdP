@@ -19,6 +19,7 @@ import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,18 +41,22 @@ import javax.servlet.http.HttpSession;
 import org.apache.log4j.Logger;
 import org.apache.xml.security.utils.Base64;
 import org.joda.time.DateTime;
+import org.jose4j.jwk.JsonWebKey;
+import org.jose4j.jwk.JsonWebKeySet;
 import org.jose4j.jws.AlgorithmIdentifiers;
 import org.jose4j.jws.JsonWebSignature;
 import org.jose4j.jwt.JwtClaims;
 import org.jose4j.lang.JoseException;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.novell.ldap.LDAPEntry;
 import com.novell.ldap.LDAPException;
 import com.novell.ldap.LDAPSearchResults;
 import com.tremolosecurity.config.util.ConfigManager;
 import com.tremolosecurity.config.util.UrlHolder;
 import com.tremolosecurity.config.xml.AuthChainType;
+import com.tremolosecurity.idp.providers.oidc.model.OpenIDConnectConfig;
 import com.tremolosecurity.idp.server.IDP;
 import com.tremolosecurity.idp.server.IdentityProvider;
 import com.tremolosecurity.provisioning.core.ProvisioningException;
@@ -71,6 +76,7 @@ import com.tremolosecurity.proxy.filter.PostProcess;
 import com.tremolosecurity.proxy.util.NextSys;
 import com.tremolosecurity.proxy.util.ProxyConstants;
 import com.tremolosecurity.saml.Attribute;
+import com.tremolosecurity.server.GlobalEntries;
 
 public class OpenIDConnectIdP implements IdentityProvider {
 
@@ -91,7 +97,32 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
 		String action = (String) request.getAttribute(IDP.ACTION_NAME);
 		
-		if (action.equalsIgnoreCase("auth")) {
+		if (action.equalsIgnoreCase(".well-known/openid-configuration")) {
+			
+			Gson gson = new GsonBuilder().setPrettyPrinting().create();
+			String json = gson.toJson(new OpenIDConnectConfig(this.idpName,request,mapper));
+			response.setContentType("application/json");
+			response.getWriter().print(json);
+			return;
+		
+		} else if (action.equalsIgnoreCase("certs")) {
+			try {
+				X509Certificate cert = GlobalEntries.getGlobalEntries().getConfigManager().getCertificate(this.jwtSigningKeyName);
+				JsonWebKey jwk = JsonWebKey.Factory.newJwk(cert.getPublicKey());
+				
+				
+				StringBuffer b = new StringBuffer();
+				b.append(cert.getSubjectDN().getName()).append('-').append(cert.getIssuerDN().getName()).append('-').append(cert.getSerialNumber().toString());
+				jwk.setKeyId(b.toString());
+				jwk.setUse("sig");
+				jwk.setAlgorithm("RS256");
+				response.setContentType("application/json");
+				response.getWriter().print(new JsonWebKeySet(jwk).toJson());
+				return;
+			} catch (JoseException e) {
+				throw new ServletException("Could not generate jwt",e);
+			}
+		} else if (action.equalsIgnoreCase("auth")) {
 			String clientID = request.getParameter("client_id");
 			String responseCode = request.getParameter("response_type");
 			String scope = request.getParameter("scope");
