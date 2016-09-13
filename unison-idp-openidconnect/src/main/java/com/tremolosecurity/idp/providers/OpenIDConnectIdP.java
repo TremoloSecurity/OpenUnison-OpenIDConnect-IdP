@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.StringTokenizer;
+import java.util.UUID;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.GZIPOutputStream;
@@ -87,6 +88,8 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	HashMap<String,OpenIDConnectTrust> trusts;
 	String jwtSigningKeyName;
 
+	
+	
 	private MapIdentity mapper;
 	
 	public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException, ServletException {
@@ -128,10 +131,12 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			String scope = request.getParameter("scope");
 			String redirectURI = request.getParameter("redirect_uri");
 			String state = request.getParameter("state");
+			String nonce = request.getParameter("nonce");
 			
 			OpenIDConnectTransaction transaction = new OpenIDConnectTransaction();
 			transaction.setClientID(clientID);
 			transaction.setResponseCode(responseCode);
+			transaction.setNonce(nonce);
 			
 			StringTokenizer toker = new StringTokenizer(scope," ",false);
 			while (toker.hasMoreTokens()) {
@@ -269,6 +274,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			String redirectURI = request.getParameter("redirect_uri");
 			String grantType = request.getParameter("grant_type");
 			
+			
 			String lastMileToken = null;
 			
 			try {
@@ -306,12 +312,15 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			
 			Attribute dn = null;
 			Attribute scopes = null;
+			String nonce = null;
 			
 			for (Attribute attr : lmreq.getAttributes()) {
 				if (attr.getName().equalsIgnoreCase("dn")) {
 					dn = attr;
 				} else if (attr.getName().equalsIgnoreCase("scope")) {
 					scopes = attr;
+				} else if (attr.getName().equalsIgnoreCase("nonce")) {
+					nonce = attr.getValues().get(0);
 				}
 			}
 			
@@ -330,6 +339,9 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			} catch (URISyntaxException e) {
 				throw new ServletException("Could not request access token",e);
 			}
+			
+			
+			/*
 			lmreq.getAttributes().add(new Attribute("dn",dn.getValues().get(0)));
 			SecretKey key = cfgMgr.getSecretKey(trust.getAccessLastmileKeyName());
 			String accessToken = null;
@@ -337,7 +349,14 @@ public class OpenIDConnectIdP implements IdentityProvider {
 				accessToken = lmreq.generateLastMileToken(key);
 			} catch (Exception e) {
 				throw new ServletException("Could not generate access token",e);
-			}
+			}*/
+			
+			String accessToken = null;
+			try {
+				accessToken = this.produceJWT(dn.getValues().get(0), scopes.getValues(), cfgMgr, new URL(request.getRequestURL().toString()), trust,request,nonce);
+			} catch (JoseException | LDAPException | ProvisioningException e1) {
+				throw new ServletException("Could not generate jwt",e1);
+			} 
 			
 			
 			
@@ -349,7 +368,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			access.setAccess_token(accessToken);
 			access.setExpires_in(Integer.toString((int) (trust.getAccessTokenTimeToLive() / 1000)));
 			try {
-				access.setId_token(this.produceJWT(dn.getValues().get(0), scopes.getValues(), cfgMgr, new URL(request.getRequestURL().toString()), trust));
+				access.setId_token(this.produceJWT(dn.getValues().get(0), scopes.getValues(), cfgMgr, new URL(request.getRequestURL().toString()), trust,request,nonce));
 			} catch (Exception e) {
 				throw new ServletException("Could not generate JWT",e);
 			} 
@@ -484,6 +503,9 @@ public class OpenIDConnectIdP implements IdentityProvider {
 		Attribute attr = new Attribute("scope");
 		attr.getValues().addAll(transaction.getScope());
 		lmreq.getAttributes().add(attr);
+		if (transaction.getNonce() != null) {
+			lmreq.getAttributes().add(new Attribute("nonce",transaction.getNonce()));
+		}
 		SecretKey key = cfgMgr.getSecretKey(trust.getCodeLastmileKeyName());
 		
 		String codeToken = lmreq.generateLastMileToken(key);
@@ -538,15 +560,15 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	}
 
 	
-	private String produceJWT(String dn,List<String> scopes,ConfigManager cfg,URL url,OpenIDConnectTrust trust) throws JoseException, LDAPException, ProvisioningException {
+	private String produceJWT(String dn,List<String> scopes,ConfigManager cfg,URL url,OpenIDConnectTrust trust,HttpServletRequest request,String nonce) throws JoseException, LDAPException, ProvisioningException {
 		
 		StringBuffer issuer = new StringBuffer();
 		issuer.append(url.getProtocol()).append("://").append(url.getHost());
 		if (url.getPort() > 0) {
 			issuer.append(':').append(url.getPort());
 		}
-		
-		issuer.append(url.getPath());
+	
+		issuer.append(cfg.getAuthIdPPath()).append(this.idpName);
 		
 		
 		// Create the Claims, which will be the content of the JWT
@@ -558,7 +580,9 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	    claims.setIssuedAtToNow();  // when the token was issued/created (now)
 	    claims.setNotBeforeMinutesInThePast(2); // time before which the token is not yet valid (2 minutes ago)
 	    claims.setSubject(dn); // the subject/principal is whom the token is about
-	    
+	    if (nonce != null) {
+	    	claims.setClaim("nonce", nonce);
+	    }
 	    ArrayList<String> attrs = new ArrayList<String>();
 	    LDAPSearchResults res = cfg.getMyVD().search(dn,0, "(objectClass=*)", attrs);
 	    
@@ -599,6 +623,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 
 	    // Set the signature algorithm on the JWT/JWS that will integrity protect the claims
 	    jws.setAlgorithmHeaderValue(AlgorithmIdentifiers.RSA_USING_SHA256);
+	    
 
 	    // Sign the JWS and produce the compact serialization or the complete JWT/JWS
 	    // representation, which is a string consisting of three dot ('.') separated
@@ -606,6 +631,8 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	    // If you wanted to encrypt it, you can simply set this jwt as the payload
 	    // of a JsonWebEncryption object and set the cty (Content Type) header to "jwt".
 	    String jwt = jws.getCompactSerialization();
+	    
+	    logger.info("JWT : '" + jwt + "'");
 	    
 	    return jwt;
 	}

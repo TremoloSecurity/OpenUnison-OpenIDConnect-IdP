@@ -21,6 +21,7 @@ public class OpenIDConnectTransaction {
 	List<String> scope;
 	String redirectURI;
 	String state;
+	String nonce;
 	
 	
 	public OpenIDConnectTransaction() {
@@ -55,6 +56,16 @@ public class OpenIDConnectTransaction {
 	public void setState(String state) {
 		this.state = state;
 	}
+
+	public String getNonce() {
+		return nonce;
+	}
+
+	public void setNonce(String nonce) {
+		this.nonce = nonce;
+	}
+	
+	
 	
 	
 }
