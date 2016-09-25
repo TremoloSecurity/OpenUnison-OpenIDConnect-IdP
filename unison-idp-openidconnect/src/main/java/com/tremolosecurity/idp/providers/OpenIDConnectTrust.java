@@ -18,11 +18,12 @@ public class OpenIDConnectTrust {
 	String clientSecret;
 	String trustName;
 	String codeLastmileKeyName;
-	String accessLastmileKeyName;
+	
 	String authChain;
 	String idAttributeName;
 	long codeTokenTimeToLive;
 	long accessTokenTimeToLive;
+	long accessTokenSkewMillis;
 	
 	public String getRedirectURI() {
 		return redirectURI;
@@ -54,12 +55,8 @@ public class OpenIDConnectTrust {
 	public void setCodeLastmileKeyName(String codeLastmileKeyName) {
 		this.codeLastmileKeyName = codeLastmileKeyName;
 	}
-	public String getAccessLastmileKeyName() {
-		return accessLastmileKeyName;
-	}
-	public void setAccessLastmileKeyName(String accessLastmileKeyName) {
-		this.accessLastmileKeyName = accessLastmileKeyName;
-	}
+	
+	
 	public String getAuthChain() {
 		return authChain;
 	}
@@ -83,6 +80,12 @@ public class OpenIDConnectTrust {
 	}
 	public void setAccessTokenTimeToLive(long accessTokenTimeToLive) {
 		this.accessTokenTimeToLive = accessTokenTimeToLive;
+	}
+	public long getAccessTokenSkewMillis() {
+		return accessTokenSkewMillis;
+	}
+	public void setAccessTokenSkewMillis(long accessTokenSkewMillis) {
+		this.accessTokenSkewMillis = accessTokenSkewMillis;
 	}
 	
 	

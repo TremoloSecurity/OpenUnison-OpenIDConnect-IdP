@@ -15,11 +15,15 @@ package com.tremolosecurity.idp.providers;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,6 +36,10 @@ import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 import java.util.zip.ZipOutputStream;
 
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.servlet.ServletContext;
 import javax.servlet.ServletException;
@@ -41,6 +49,17 @@ import javax.servlet.http.HttpSession;
 
 import org.apache.log4j.Logger;
 import org.apache.xml.security.utils.Base64;
+import org.hibernate.Query;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.boot.MetadataSources;
+import org.hibernate.boot.cfgxml.spi.LoadedConfig;
+import org.hibernate.boot.jaxb.cfg.spi.JaxbCfgHibernateConfiguration;
+import org.hibernate.boot.jaxb.cfg.spi.JaxbCfgMappingReferenceType;
+import org.hibernate.boot.jaxb.cfg.spi.JaxbCfgHibernateConfiguration.JaxbCfgSessionFactory;
+import org.hibernate.boot.registry.StandardServiceRegistry;
+import org.hibernate.boot.registry.StandardServiceRegistryBuilder;
+import org.hibernate.cfg.Configuration;
 import org.joda.time.DateTime;
 import org.jose4j.jwk.JsonWebKey;
 import org.jose4j.jwk.JsonWebKeySet;
@@ -56,10 +75,14 @@ import com.novell.ldap.LDAPException;
 import com.novell.ldap.LDAPSearchResults;
 import com.tremolosecurity.config.util.ConfigManager;
 import com.tremolosecurity.config.util.UrlHolder;
+import com.tremolosecurity.config.xml.ApplicationType;
 import com.tremolosecurity.config.xml.AuthChainType;
+import com.tremolosecurity.idp.providers.oidc.model.OIDCSession;
 import com.tremolosecurity.idp.providers.oidc.model.OpenIDConnectConfig;
+import com.tremolosecurity.idp.providers.oidc.session.ClearOidcSessionOnLogout;
 import com.tremolosecurity.idp.server.IDP;
 import com.tremolosecurity.idp.server.IdentityProvider;
+import com.tremolosecurity.json.Token;
 import com.tremolosecurity.provisioning.core.ProvisioningException;
 import com.tremolosecurity.provisioning.core.User;
 import com.tremolosecurity.provisioning.mapping.MapIdentity;
@@ -67,6 +90,7 @@ import com.tremolosecurity.proxy.auth.AuthController;
 import com.tremolosecurity.proxy.auth.AuthInfo;
 import com.tremolosecurity.proxy.auth.AzSys;
 import com.tremolosecurity.proxy.auth.RequestHolder;
+import com.tremolosecurity.proxy.auth.passwordreset.PasswordResetRequest;
 import com.tremolosecurity.proxy.filter.HttpFilterChain;
 import com.tremolosecurity.proxy.filter.HttpFilterChainImpl;
 import com.tremolosecurity.proxy.filter.HttpFilterRequest;
@@ -74,21 +98,28 @@ import com.tremolosecurity.proxy.filter.HttpFilterRequestImpl;
 import com.tremolosecurity.proxy.filter.HttpFilterResponse;
 import com.tremolosecurity.proxy.filter.HttpFilterResponseImpl;
 import com.tremolosecurity.proxy.filter.PostProcess;
+import com.tremolosecurity.proxy.logout.LogoutUtil;
 import com.tremolosecurity.proxy.util.NextSys;
 import com.tremolosecurity.proxy.util.ProxyConstants;
 import com.tremolosecurity.saml.Attribute;
 import com.tremolosecurity.server.GlobalEntries;
+import com.tremolosecurity.server.StopableThread;
 
 public class OpenIDConnectIdP implements IdentityProvider {
+
+	public static final String UNISON_OPENIDCONNECT_IDPS = "unison.openidconnectidps";
 
 	static Logger logger = Logger.getLogger(OpenIDConnectIdP.class.getName());
 	
 	private static final String TRANSACTION_DATA = "unison.openidconnect.session";
+
+	public static final String UNISON_SESSION_OIDC_ACCESS_TOKEN = "unison.session.oidc.access.token";
+	public static final String UNISON_SESSION_OIDC_ID_TOKEN = "unison.session.oidc.id.token";
 	String idpName;
 	HashMap<String,OpenIDConnectTrust> trusts;
 	String jwtSigningKeyName;
 
-	
+	private SessionFactory sessionFactory;
 	
 	private MapIdentity mapper;
 	
@@ -275,6 +306,11 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			String grantType = request.getParameter("grant_type");
 			
 			
+			AuthController ac = (AuthController) request.getSession().getAttribute(ProxyConstants.AUTH_CTL);
+			UrlHolder holder = (UrlHolder) request.getAttribute(ProxyConstants.AUTOIDM_CFG);
+			
+			holder.getApp().getCookieConfig().getTimeout();
+			
 			String lastMileToken = null;
 			
 			try {
@@ -353,7 +389,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			
 			String accessToken = null;
 			try {
-				accessToken = this.produceJWT(dn.getValues().get(0), scopes.getValues(), cfgMgr, new URL(request.getRequestURL().toString()), trust,request,nonce);
+				accessToken = this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization();
 			} catch (JoseException | LDAPException | ProvisioningException e1) {
 				throw new ServletException("Could not generate jwt",e1);
 			} 
@@ -368,12 +404,23 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			access.setAccess_token(accessToken);
 			access.setExpires_in(Integer.toString((int) (trust.getAccessTokenTimeToLive() / 1000)));
 			try {
-				access.setId_token(this.produceJWT(dn.getValues().get(0), scopes.getValues(), cfgMgr, new URL(request.getRequestURL().toString()), trust,request,nonce));
+				access.setId_token(this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization());
 			} catch (Exception e) {
 				throw new ServletException("Could not generate JWT",e);
 			} 
 			
 			access.setToken_type("Bearer");
+			OIDCSession oidcSession = null;
+			
+			try {
+				oidcSession = this.storeSession(access,holder.getApp(),trust.getCodeLastmileKeyName(),request);
+			} catch (InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IllegalBlockSizeException
+					| BadPaddingException e) {
+				throw new ServletException("Could not store session",e);
+			}
+			
+			
+			access.setRefresh_token(oidcSession.getEncryptedRefreshToken());
 			
 			Gson gson = new Gson();
 			String json = gson.toJson(access);
@@ -386,6 +433,72 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			
 		}
 
+	}
+
+	public OIDCSession storeSession(OpenIDConnectAccessToken access,ApplicationType app,String codeTokenKeyName,HttpServletRequest request) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, IOException {
+		Gson gson = new Gson();
+		
+		OIDCSession session = new OIDCSession();
+		session.setAccessToken(access.getAccess_token());
+		session.setIdToken(access.getId_token());
+		session.setApplicationName(app.getName());
+		session.setSessionExpires(new Timestamp(new DateTime().plusSeconds(app.getCookieConfig().getTimeout()).getMillis()));
+		UUID refreshToken = UUID.randomUUID();
+		session.setRefreshToken(refreshToken.toString());
+		
+		byte[] bjson = refreshToken.toString().getBytes("UTF-8");
+		
+		Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+		cipher.init(Cipher.ENCRYPT_MODE, GlobalEntries.getGlobalEntries().getConfigManager().getSecretKey(codeTokenKeyName));
+		
+		byte[] encJson = cipher.doFinal(bjson);
+		String base64d = new String(org.bouncycastle.util.encoders.Base64.encode(encJson));
+		
+		Token token = new Token();
+		token.setEncryptedRequest(base64d);
+		token.setIv(new String(org.bouncycastle.util.encoders.Base64.encode(cipher.getIV())));
+		
+		
+		byte[] bxml = gson.toJson(token).getBytes("UTF-8");
+
+		ByteArrayOutputStream baos = new ByteArrayOutputStream();
+		
+		DeflaterOutputStream compressor  = new DeflaterOutputStream(baos,new Deflater(Deflater.BEST_COMPRESSION,true));
+		
+		compressor.write(bxml);
+		compressor.flush();
+		compressor.close();
+		
+		
+		
+		String b64 = new String( Base64.encode(baos.toByteArray()));
+		
+		
+		session.setEncryptedRefreshToken(b64);
+		
+		Session db = null;
+		try {
+			db = this.sessionFactory.openSession();
+			
+			db.beginTransaction();
+			db.save(session);
+			db.getTransaction().commit();
+			
+			
+			LogoutUtil.insertFirstLogoutHandler(request, new ClearOidcSessionOnLogout(session,this));
+			
+			
+			return session;
+			
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+		
 	}
 
 	private String inflate(String saml) throws Exception {
@@ -535,7 +648,7 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	
 	public void init(String idpName,ServletContext ctx, HashMap<String, Attribute> init,
 			HashMap<String, HashMap<String, Attribute>> trustCfg,MapIdentity mapper) {
-		
+		final String localIdPName = idpName;
 		this.idpName = idpName;
 		this.trusts = new HashMap<String,OpenIDConnectTrust>();
 		for (String trustName : trustCfg.keySet()) {
@@ -544,11 +657,11 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			trust.setClientID(attrs.get("clientID").getValues().get(0));
 			trust.setClientSecret(attrs.get("clientSecret").getValues().get(0));
 			trust.setRedirectURI(attrs.get("redirectURI").getValues().get(0));
-			trust.setAccessLastmileKeyName(attrs.get("accessLastMileKeyName").getValues().get(0));
 			trust.setCodeLastmileKeyName(attrs.get("codeLastMileKeyName").getValues().get(0));
 			trust.setAuthChain(attrs.get("authChainName").getValues().get(0));
 			trust.setCodeTokenTimeToLive(Long.parseLong(attrs.get("codeTokenSkewMilis").getValues().get(0)));
-			trust.setAccessTokenTimeToLive(Long.parseLong(attrs.get("accessTokenSkewMilis").getValues().get(0)));
+			trust.setAccessTokenTimeToLive(Long.parseLong(attrs.get("accessTokenTimeToLive").getValues().get(0)));
+			trust.setAccessTokenSkewMillis(Long.parseLong(attrs.get("accessTokenSkewMillis").getValues().get(0)));
 			trust.setTrustName(trustName);
 			trusts.put(trust.getClientID(), trust);
 			
@@ -556,53 +669,79 @@ public class OpenIDConnectIdP implements IdentityProvider {
 		
 		this.mapper = mapper;
 		this.jwtSigningKeyName = init.get("jwtSigningKey").getValues().get(0);
+		
+		HashMap<String,OpenIDConnectIdP> oidcIdPs = (HashMap<String, OpenIDConnectIdP>) GlobalEntries.getGlobalEntries().get(UNISON_OPENIDCONNECT_IDPS);
+		if (oidcIdPs == null) {
+			oidcIdPs = new HashMap<String,OpenIDConnectIdP>();
+			GlobalEntries.getGlobalEntries().set(UNISON_OPENIDCONNECT_IDPS, oidcIdPs);
+		}
+		
+		oidcIdPs.put(this.idpName, this);
+		
+		GlobalEntries.getGlobalEntries().getConfigManager().addThread(new StopableThread() {
+
+			@Override
+			public void run() {
+				//do nothing
+				
+			}
+
+			@Override
+			public void stop() {
+				HashMap<String,OpenIDConnectIdP> oidcIdPs = (HashMap<String, OpenIDConnectIdP>) GlobalEntries.getGlobalEntries().get(UNISON_OPENIDCONNECT_IDPS);
+				if (oidcIdPs != null) {
+					oidcIdPs.remove(localIdPName);
+				}
+				
+			}});
+		
+		String driver = init.get("driver").getValues().get(0);
+		logger.info("Driver : '" + driver + "'");
+		
+		String url = init.get("url").getValues().get(0);;
+		logger.info("URL : " + url);
+		String user = init.get("user").getValues().get(0);;
+		logger.info("User : " + user);
+		String pwd = init.get("password").getValues().get(0);;
+		logger.info("Password : **********");
+		
+		
+		int maxCons = Integer.parseInt(init.get("maxCons").getValues().get(0));
+		logger.info("Max Cons : " + maxCons);
+		int maxIdleCons = Integer.parseInt(init.get("maxIdleCons").getValues().get(0));
+		logger.info("maxIdleCons : " + maxIdleCons);
+		
+		String dialect = init.get("dialect").getValues().get(0);
+		logger.info("Hibernate Dialect : '" + dialect + "'");
+		
+		String validationQuery = init.get("validationQuery").getValues().get(0);
+		logger.info("Validation Query : '" + validationQuery + "'");
+        
+        this.initializeHibernate(driver, user, pwd, url, dialect, maxCons, maxIdleCons, validationQuery);
 
 	}
 
-	
-	private String produceJWT(String dn,List<String> scopes,ConfigManager cfg,URL url,OpenIDConnectTrust trust,HttpServletRequest request,String nonce) throws JoseException, LDAPException, ProvisioningException {
+	public JsonWebSignature generateJWS(JwtClaims claims) throws JoseException, LDAPException, ProvisioningException, MalformedURLException {
 		
-		StringBuffer issuer = new StringBuffer();
-		issuer.append(url.getProtocol()).append("://").append(url.getHost());
-		if (url.getPort() > 0) {
-			issuer.append(':').append(url.getPort());
+		
+		return this.produceJWT(claims,GlobalEntries.getGlobalEntries().getConfigManager());
+	}
+	
+	
+	public JwtClaims generateClaims(AuthInfo user,ConfigManager cfg,String trustName,String urlOfRequest) throws JoseException, LDAPException, ProvisioningException, MalformedURLException {
+		String url = urlOfRequest;
+		int end = url.indexOf('/',url.indexOf("://") + 3);
+		if (end != -1) {
+			url = url.substring(0,end);
 		}
+		
+		return generateClaims(user.getUserDN(), cfg, new URL(url), this.trusts.get(trustName), null);
+	}
 	
-		issuer.append(cfg.getAuthIdPPath()).append(this.idpName);
-		
-		
-		// Create the Claims, which will be the content of the JWT
-	    JwtClaims claims = new JwtClaims();
-	    claims.setIssuer(issuer.toString());  // who creates the token and signs it
-	    claims.setAudience(trust.getClientID()); // to whom the token is intended to be sent
-	    claims.setExpirationTimeMinutesInTheFuture(trust.getAccessTokenTimeToLive() / 1000 / 60); // time when the token will expire (10 minutes from now)
-	    claims.setGeneratedJwtId(); // a unique identifier for the token
-	    claims.setIssuedAtToNow();  // when the token was issued/created (now)
-	    claims.setNotBeforeMinutesInThePast(2); // time before which the token is not yet valid (2 minutes ago)
-	    claims.setSubject(dn); // the subject/principal is whom the token is about
-	    if (nonce != null) {
-	    	claims.setClaim("nonce", nonce);
-	    }
-	    ArrayList<String> attrs = new ArrayList<String>();
-	    LDAPSearchResults res = cfg.getMyVD().search(dn,0, "(objectClass=*)", attrs);
-	    
-	    res.hasMore();
-	    LDAPEntry entry = res.next();
-	    
-	    User user = new User(entry); 
-	    user = this.mapper.mapUser(user, true);
-	    
-	    for (String attrName : scopes) {
-	    	Attribute attr = user.getAttribs().get(attrName);
-	    	if (attr != null) {
-		    	if (attr.getValues().size() == 1) {
-		    		claims.setClaim(attrName,attr.getValues().get(0));
-		    	} else {
-		    		claims.setStringListClaim(attrName, attr.getValues());
-		    	}
-	    	}
-	    }
-	    
+	
+	private JsonWebSignature produceJWT(JwtClaims claims,ConfigManager cfg) throws JoseException, LDAPException, ProvisioningException {
+		//String dn,ConfigManager cfg,URL url,OpenIDConnectTrust trust,HttpServletRequest request,String nonce
+		//JwtClaims claims = generateClaims(dn, cfg, url, trust, nonce);
 	    
 	   
 
@@ -625,15 +764,231 @@ public class OpenIDConnectIdP implements IdentityProvider {
 	    jws.setAlgorithmHeaderValue(AlgorithmIdentifiers.RSA_USING_SHA256);
 	    
 
-	    // Sign the JWS and produce the compact serialization or the complete JWT/JWS
-	    // representation, which is a string consisting of three dot ('.') separated
-	    // base64url-encoded parts in the form Header.Payload.Signature
-	    // If you wanted to encrypt it, you can simply set this jwt as the payload
-	    // of a JsonWebEncryption object and set the cty (Content Type) header to "jwt".
-	    String jwt = jws.getCompactSerialization();
 	    
-	    logger.info("JWT : '" + jwt + "'");
 	    
-	    return jwt;
+	    return jws;
 	}
+
+	private JwtClaims generateClaims(String dn, ConfigManager cfg, URL url, OpenIDConnectTrust trust, String nonce)
+			throws LDAPException, ProvisioningException {
+		StringBuffer issuer = new StringBuffer();
+		issuer.append(url.getProtocol()).append("://").append(url.getHost());
+		if (url.getPort() > 0) {
+			issuer.append(':').append(url.getPort());
+		}
+	
+		issuer.append(cfg.getAuthIdPPath()).append(this.idpName);
+		
+		
+		// Create the Claims, which will be the content of the JWT
+	    JwtClaims claims = new JwtClaims();
+	    claims.setIssuer(issuer.toString());  // who creates the token and signs it
+	    claims.setAudience(trust.getClientID()); // to whom the token is intended to be sent
+	    claims.setExpirationTimeMinutesInTheFuture(trust.getAccessTokenTimeToLive() / 1000 / 60); // time when the token will expire (10 minutes from now)
+	    
+	    claims.setGeneratedJwtId(); // a unique identifier for the token
+	    claims.setIssuedAtToNow();  // when the token was issued/created (now)
+	    claims.setNotBeforeMinutesInThePast(trust.getAccessTokenSkewMillis() / 1000 / 60); // time before which the token is not yet valid (2 minutes ago)
+	    //claims.setSubject(dn); // the subject/principal is whom the token is about
+	    if (nonce != null) {
+	    	claims.setClaim("nonce", nonce);
+	    }
+	    ArrayList<String> attrs = new ArrayList<String>();
+	    LDAPSearchResults res = cfg.getMyVD().search(dn,0, "(objectClass=*)", attrs);
+	    
+	    res.hasMore();
+	    LDAPEntry entry = res.next();
+	    
+	    User user = new User(entry); 
+	    user = this.mapper.mapUser(user, true);
+	    
+	    
+	    
+	    for (String attrName : user.getAttribs().keySet()) {
+	    	Attribute attr = user.getAttribs().get(attrName);
+	    	if (attr != null) {
+		    	if (attr.getName().equalsIgnoreCase("sub")) {
+		    		claims.setSubject(attr.getValues().get(0));
+		    	} else if (attr.getValues().size() == 1) {
+		    		claims.setClaim(attrName,attr.getValues().get(0));
+		    	} else {
+		    		claims.setStringListClaim(attrName, attr.getValues());
+		    	}
+	    	}
+	    }
+		return claims;
+	}
+	
+	private void initializeHibernate(String driver, String user,String password,String url,String dialect,int maxCons,int maxIdleCons,String validationQuery) {
+		StandardServiceRegistryBuilder builder = new StandardServiceRegistryBuilder();
+		
+		
+		Configuration config = new Configuration();
+		config.setProperty("hibernate.connection.driver_class", driver);
+		config.setProperty("hibernate.connection.password", password);
+		config.setProperty("hibernate.connection.url", url);
+		config.setProperty("hibernate.connection.username", user);
+		config.setProperty("hibernate.dialect", dialect);
+		config.setProperty("hibernate.hbm2ddl.auto", "update");
+		config.setProperty("show_sql", "true");
+		config.setProperty("hibernate.current_session_context_class", "thread");
+		
+		config.setProperty("hibernate.c3p0.max_size", Integer.toString(maxCons));
+		config.setProperty("hibernate.c3p0.maxIdleTimeExcessConnections", Integer.toString(maxIdleCons));
+		
+		if (validationQuery != null && ! validationQuery.isEmpty()) {
+			config.setProperty("hibernate.c3p0.testConnectionOnCheckout", "true");
+		}
+		config.setProperty("hibernate.c3p0.autoCommitOnClose", "true");
+		
+
+		
+		//config.setProperty("hibernate.c3p0.debugUnreturnedConnectionStackTraces", "true");
+		//config.setProperty("hibernate.c3p0.unreturnedConnectionTimeout", "30");
+		
+		
+		
+		if (validationQuery == null) {
+			validationQuery = "SELECT 1";
+		}
+		config.setProperty("hibernate.c3p0.preferredTestQuery", validationQuery);
+		
+		
+
+		
+		JaxbCfgHibernateConfiguration jaxbCfg = new JaxbCfgHibernateConfiguration();
+		jaxbCfg.setSessionFactory(new JaxbCfgSessionFactory());
+		
+		JaxbCfgMappingReferenceType mrt = new JaxbCfgMappingReferenceType();
+		mrt.setClazz(OIDCSession.class.getName());
+		jaxbCfg.getSessionFactory().getMapping().add(mrt);
+		
+		LoadedConfig lc = LoadedConfig.consume(jaxbCfg);
+		
+		
+		
+		StandardServiceRegistry registry = builder.configure(lc).applySettings(config.getProperties()).build();
+		try {
+			sessionFactory = new MetadataSources( registry ).buildMetadata().buildSessionFactory();
+			
+			GlobalEntries.getGlobalEntries().getConfigManager().addThread(new StopableThread() {
+
+				@Override
+				public void run() {
+					
+					
+				}
+
+				@Override
+				public void stop() {
+					logger.info("Stopping hibernate");
+					sessionFactory.close();
+					
+				}
+				
+			});
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+			// The registry would be destroyed by the SessionFactory, but we had trouble building the SessionFactory
+			// so destroy it manually.
+			StandardServiceRegistryBuilder.destroy( registry );
+		}
+	}
+
+	public void removeSession(OIDCSession session) {
+		Session db = null;
+		try {
+			db = this.sessionFactory.openSession();
+			
+			//check to see if the object still exists
+			OIDCSession lsession = db.get(OIDCSession.class, session.getId());
+			if (lsession != null) {
+				db.beginTransaction();
+				db.delete(lsession);
+				db.getTransaction().commit();
+			}
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+		
+	}
+
+	public HashMap<String, OpenIDConnectTrust> getTrusts() {
+		return trusts;
+	}
+
+	public OIDCSession getSessionByRefreshToken(String refreshToken) {
+		Session db = null;
+		try {
+			db = this.sessionFactory.openSession();
+			String hql = "FROM OIDCSession o WHERE o.refreshToken = :refresh_token";
+			Query query = db.createQuery(hql);
+			query.setParameter("refresh_token",refreshToken);
+			List<OIDCSession> results = query.list();
+			if (results == null || results.isEmpty()) {
+				return null;
+			}
+			
+			OIDCSession session = results.get(0);
+			if (new DateTime(session.getSessionExpires()).isBeforeNow()) {
+				db.beginTransaction();
+				db.delete(session);
+				db.getTransaction().commit();
+				return null;
+			} else {
+				return session;
+			}
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+	}
+
+	public void updateToken(OIDCSession session) {
+		Session db = null;
+		ApplicationType app = null;
+		for (ApplicationType at : GlobalEntries.getGlobalEntries().getConfigManager().getCfg().getApplications().getApplication()) {
+			if (at.getName().equals(session.getApplicationName())) {
+				app = at;
+			}
+		}
+		
+		
+		try {
+			db = this.sessionFactory.openSession();
+			
+			//check to see if the object still exists
+			OIDCSession lsession = db.get(OIDCSession.class, session.getId());
+			if (lsession != null) {
+				db.beginTransaction();
+				
+				lsession.setAccessToken(session.getAccessToken());
+				lsession.setIdToken(session.getIdToken());
+				lsession.setSessionExpires(new Timestamp(System.currentTimeMillis() + (app.getCookieConfig().getTimeout() * 1000)));
+				db.save(lsession);
+				
+				db.getTransaction().commit();
+			}
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+		
+	}
+	
+	
 }
