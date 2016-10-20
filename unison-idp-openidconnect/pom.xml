@@ -88,6 +88,7 @@
 			<groupId>org.hibernate</groupId>
 			<artifactId>hibernate-c3p0</artifactId>
 			<version>5.2.1.Final</version>
+			<scope>provided</scope>
 		</dependency>
 	</dependencies>
 	

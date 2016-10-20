@@ -20,6 +20,7 @@ import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
@@ -41,6 +42,7 @@ import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
 import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.IvParameterSpec;
 import javax.servlet.ServletContext;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
@@ -61,11 +63,13 @@ import org.hibernate.boot.registry.StandardServiceRegistry;
 import org.hibernate.boot.registry.StandardServiceRegistryBuilder;
 import org.hibernate.cfg.Configuration;
 import org.joda.time.DateTime;
+import org.jose4j.jwe.JsonWebEncryption;
 import org.jose4j.jwk.JsonWebKey;
 import org.jose4j.jwk.JsonWebKeySet;
 import org.jose4j.jws.AlgorithmIdentifiers;
 import org.jose4j.jws.JsonWebSignature;
 import org.jose4j.jwt.JwtClaims;
+import org.jose4j.jwt.consumer.InvalidJwtException;
 import org.jose4j.lang.JoseException;
 
 import com.google.gson.Gson;
@@ -304,135 +308,279 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			String clientSecret = request.getParameter("client_secret");
 			String redirectURI = request.getParameter("redirect_uri");
 			String grantType = request.getParameter("grant_type");
-			
+			String refreshToken = request.getParameter("refresh_token");
 			
 			AuthController ac = (AuthController) request.getSession().getAttribute(ProxyConstants.AUTH_CTL);
 			UrlHolder holder = (UrlHolder) request.getAttribute(ProxyConstants.AUTOIDM_CFG);
 			
 			holder.getApp().getCookieConfig().getTimeout();
 			
-			String lastMileToken = null;
 			
-			try {
-				lastMileToken = this.inflate(code);
-				lastMileToken = Base64.encode(lastMileToken.getBytes("UTF-8"));
-			} catch (Exception e) {
-				throw new ServletException("Could not inflate code",e);
-			}
 			
-			OpenIDConnectTrust trust = this.trusts.get(clientID);
-			
-			if (! clientSecret.equals(trust.getClientSecret())) {
-				response.sendError(403);
-				return;
-			}
-			
-			ConfigManager cfg = (ConfigManager) request.getAttribute(ProxyConstants.TREMOLO_CFG_OBJ);
-			
-			SecretKey codeKey = cfg.getSecretKey(trust.getCodeLastmileKeyName());
-			com.tremolosecurity.lastmile.LastMile lmreq = new com.tremolosecurity.lastmile.LastMile();
-			try {
-				lmreq.loadLastMielToken(lastMileToken, codeKey);
-			} catch (Exception e) {
-				logger.warn("Could not decrypt code token",e);
-				response.sendError(403);
-				return;
-			}
-			
-			if (! lmreq.isValid()) {
-				
-				response.sendError(403);
-				logger.warn("Could not validate code token");
-				return;
-			}
-			
-			Attribute dn = null;
-			Attribute scopes = null;
-			String nonce = null;
-			
-			for (Attribute attr : lmreq.getAttributes()) {
-				if (attr.getName().equalsIgnoreCase("dn")) {
-					dn = attr;
-				} else if (attr.getName().equalsIgnoreCase("scope")) {
-					scopes = attr;
-				} else if (attr.getName().equalsIgnoreCase("nonce")) {
-					nonce = attr.getValues().get(0);
+			if (refreshToken != null) {
+				try {
+					refreshToken(response, clientID, clientSecret, refreshToken);
+				} catch (Exception e) {
+					throw new ServletException("Could not refresh token",e);
 				}
+				
+				
+			} else {
+				completeUserLogin(request, response, code, clientID, clientSecret, holder);
 			}
-			
-			
-			ConfigManager cfgMgr = (ConfigManager) request.getAttribute(ProxyConstants.TREMOLO_CFG_OBJ);
-			
-			DateTime now = new DateTime();
-			DateTime notBefore = now.minus(trust.getCodeTokenTimeToLive());
-			DateTime notAfter = now.plus(trust.getCodeTokenTimeToLive());
-			
-			int authLevel = lmreq.getLoginLevel();
-			String authMethod = lmreq.getAuthChain();
-			
-			try {
-				lmreq = new com.tremolosecurity.lastmile.LastMile(request.getRequestURI(),notBefore,notAfter,authLevel,authMethod);
-			} catch (URISyntaxException e) {
-				throw new ServletException("Could not request access token",e);
-			}
-			
-			
-			/*
-			lmreq.getAttributes().add(new Attribute("dn",dn.getValues().get(0)));
-			SecretKey key = cfgMgr.getSecretKey(trust.getAccessLastmileKeyName());
-			String accessToken = null;
-			try {
-				accessToken = lmreq.generateLastMileToken(key);
-			} catch (Exception e) {
-				throw new ServletException("Could not generate access token",e);
-			}*/
-			
-			String accessToken = null;
-			try {
-				accessToken = this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization();
-			} catch (JoseException | LDAPException | ProvisioningException e1) {
-				throw new ServletException("Could not generate jwt",e1);
-			} 
-			
-			
-			
-			
-			
-			
-			OpenIDConnectAccessToken access = new OpenIDConnectAccessToken();
-			
-			access.setAccess_token(accessToken);
-			access.setExpires_in(Integer.toString((int) (trust.getAccessTokenTimeToLive() / 1000)));
-			try {
-				access.setId_token(this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization());
-			} catch (Exception e) {
-				throw new ServletException("Could not generate JWT",e);
-			} 
-			
-			access.setToken_type("Bearer");
-			OIDCSession oidcSession = null;
-			
-			try {
-				oidcSession = this.storeSession(access,holder.getApp(),trust.getCodeLastmileKeyName(),request);
-			} catch (InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IllegalBlockSizeException
-					| BadPaddingException e) {
-				throw new ServletException("Could not store session",e);
-			}
-			
-			
-			access.setRefresh_token(oidcSession.getEncryptedRefreshToken());
-			
-			Gson gson = new Gson();
-			String json = gson.toJson(access);
-			
-			response.setContentType("text/json");
-			response.getOutputStream().write(json.getBytes());
-			response.getOutputStream().flush();
-			
 			
 			
 		}
 
+	}
+
+	private void refreshToken(HttpServletResponse response, String clientID, String clientSecret, String refreshToken)
+			throws Exception, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException,
+			InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException, IOException,
+			JoseException, InvalidJwtException, UnsupportedEncodingException {
+		Gson gson = new Gson();
+		String json = this.inflate(refreshToken);
+		Token token = gson.fromJson(json, Token.class);
+		
+		byte[] iv = org.bouncycastle.util.encoders.Base64.decode(token.getIv());
+		
+		
+		IvParameterSpec spec =  new IvParameterSpec(iv);
+		Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+		cipher.init(Cipher.DECRYPT_MODE, GlobalEntries.getGlobalEntries().getConfigManager().getSecretKey(this.trusts.get(clientID).getCodeLastmileKeyName()),spec);
+		
+		byte[] encBytes = org.bouncycastle.util.encoders.Base64.decode(token.getEncryptedRequest());
+		String decryptedRefreshToken = new String(cipher.doFinal(encBytes));
+		
+		OIDCSession session = this.getSessionByRefreshToken(decryptedRefreshToken);
+		
+		if (session == null) {
+			logger.warn("Session does not exist from refresh_token");
+			response.sendError(401);
+			return;
+		}
+		
+		
+		String clientSecretFromSession = this.decryptClientSecret(this.trusts.get(clientID).getCodeLastmileKeyName(), session.getEncryptedClientSecret());
+		if (! clientSecretFromSession.equals(clientSecret)) {
+			logger.warn("Invalid client_secret");
+			response.sendError(401);
+			return;
+		} 
+		
+		JsonWebSignature jws = new JsonWebSignature();
+		jws.setCompactSerialization(session.getIdToken());
+		jws.setKey(GlobalEntries.getGlobalEntries().getConfigManager().getCertificate(this.jwtSigningKeyName).getPublicKey());
+		
+		if (! jws.verifySignature()) {
+			logger.warn("id_token tampered with");
+			response.sendError(401);
+			return;
+		}
+		
+		JwtClaims claims = JwtClaims.parse(jws.getPayload());
+		
+		claims.setGeneratedJwtId(); // a unique identifier for the token
+		claims.setIssuedAtToNow();  // when the token was issued/created (now)
+		claims.setNotBeforeMinutesInThePast(trusts.get(clientID).getAccessTokenSkewMillis() / 1000 / 60); // time before which the token is not yet valid (2 minutes ago)
+		claims.setExpirationTimeMinutesInTheFuture(trusts.get(clientID).getAccessTokenTimeToLive() / 1000 / 60); // time when the token will expire (10 minutes from now)
+		
+		jws = new JsonWebSignature();
+		jws.setPayload(claims.toJson());
+		jws.setKey(GlobalEntries.getGlobalEntries().getConfigManager().getPrivateKey(this.jwtSigningKeyName));
+		jws.setAlgorithmHeaderValue(AlgorithmIdentifiers.RSA_USING_SHA256);
+		
+		session.setIdToken(jws.getCompactSerialization());
+		
+		jws = new JsonWebSignature();
+		jws.setKey(GlobalEntries.getGlobalEntries().getConfigManager().getCertificate(this.jwtSigningKeyName).getPublicKey());
+		jws.setCompactSerialization(session.getAccessToken());
+		if (! jws.verifySignature()) {
+			logger.warn("access_token tampered with");
+			response.sendError(401);
+			return;
+		}
+		
+		claims = JwtClaims.parse(jws.getPayload());
+		
+		claims.setGeneratedJwtId(); // a unique identifier for the token
+		claims.setIssuedAtToNow();  // when the token was issued/created (now)
+		claims.setNotBeforeMinutesInThePast(trusts.get(clientID).getAccessTokenSkewMillis() / 1000 / 60); // time before which the token is not yet valid (2 minutes ago)
+		claims.setExpirationTimeMinutesInTheFuture(trusts.get(clientID).getAccessTokenTimeToLive() / 1000 / 60); // time when the token will expire (10 minutes from now)
+		
+		jws = new JsonWebSignature();
+		jws.setPayload(claims.toJson());
+		jws.setKey(GlobalEntries.getGlobalEntries().getConfigManager().getPrivateKey(this.jwtSigningKeyName));
+		jws.setAlgorithmHeaderValue(AlgorithmIdentifiers.RSA_USING_SHA256);
+		
+		session.setAccessToken(jws.getCompactSerialization());
+		
+		UUID newRefreshToken = UUID.randomUUID();
+		session.setRefreshToken(newRefreshToken.toString());
+		
+		String b64 = encryptToken(trusts.get(clientID).getCodeLastmileKeyName(), gson, newRefreshToken);
+		session.setEncryptedRefreshToken(b64);
+		
+		Session db = null;
+		try {
+			db = this.sessionFactory.openSession();
+			
+			OIDCSession loadSession = db.get(OIDCSession.class, session.getId());
+			
+			loadSession.setIdToken(session.getIdToken());
+			loadSession.setAccessToken(session.getAccessToken());
+			loadSession.setRefreshToken(session.getRefreshToken());
+			loadSession.setEncryptedRefreshToken(session.getEncryptedRefreshToken());
+			
+			db.beginTransaction();
+			db.save(loadSession);
+			db.getTransaction().commit();
+			
+			
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+		
+		OpenIDConnectAccessToken access = new OpenIDConnectAccessToken();
+		
+		access.setAccess_token(session.getAccessToken());
+		access.setExpires_in((int) (trusts.get(clientID).getAccessTokenTimeToLive() / 1000));
+		access.setId_token(session.getIdToken());
+		access.setToken_type("Bearer");
+		access.setRefresh_token(session.getEncryptedRefreshToken());
+		
+		json = gson.toJson(access);
+		
+		response.setContentType("text/json");
+		response.getOutputStream().write(json.getBytes());
+		response.getOutputStream().flush();
+	}
+
+	private void completeUserLogin(HttpServletRequest request, HttpServletResponse response, String code,
+			String clientID, String clientSecret, UrlHolder holder)
+			throws ServletException, IOException, MalformedURLException {
+		String lastMileToken = null;
+		
+		try {
+			lastMileToken = this.inflate(code);
+			lastMileToken = new String(org.bouncycastle.util.encoders.Base64.encode(lastMileToken.getBytes("UTF-8")));
+		} catch (Exception e) {
+			throw new ServletException("Could not inflate code",e);
+		}
+		
+		OpenIDConnectTrust trust = this.trusts.get(clientID);
+		
+		if (! clientSecret.equals(trust.getClientSecret())) {
+			response.sendError(403);
+			return;
+		}
+		
+		ConfigManager cfg = (ConfigManager) request.getAttribute(ProxyConstants.TREMOLO_CFG_OBJ);
+		
+		SecretKey codeKey = cfg.getSecretKey(trust.getCodeLastmileKeyName());
+		com.tremolosecurity.lastmile.LastMile lmreq = new com.tremolosecurity.lastmile.LastMile();
+		try {
+			lmreq.loadLastMielToken(lastMileToken, codeKey);
+		} catch (Exception e) {
+			logger.warn("Could not decrypt code token",e);
+			response.sendError(403);
+			return;
+		}
+		
+		if (! lmreq.isValid()) {
+			
+			response.sendError(403);
+			logger.warn("Could not validate code token");
+			return;
+		}
+		
+		Attribute dn = null;
+		Attribute scopes = null;
+		String nonce = null;
+		
+		for (Attribute attr : lmreq.getAttributes()) {
+			if (attr.getName().equalsIgnoreCase("dn")) {
+				dn = attr;
+			} else if (attr.getName().equalsIgnoreCase("scope")) {
+				scopes = attr;
+			} else if (attr.getName().equalsIgnoreCase("nonce")) {
+				nonce = attr.getValues().get(0);
+			}
+		}
+		
+		
+		ConfigManager cfgMgr = (ConfigManager) request.getAttribute(ProxyConstants.TREMOLO_CFG_OBJ);
+		
+		DateTime now = new DateTime();
+		DateTime notBefore = now.minus(trust.getCodeTokenTimeToLive());
+		DateTime notAfter = now.plus(trust.getCodeTokenTimeToLive());
+		
+		int authLevel = lmreq.getLoginLevel();
+		String authMethod = lmreq.getAuthChain();
+		
+		try {
+			lmreq = new com.tremolosecurity.lastmile.LastMile(request.getRequestURI(),notBefore,notAfter,authLevel,authMethod);
+		} catch (URISyntaxException e) {
+			throw new ServletException("Could not request access token",e);
+		}
+		
+		
+		/*
+		lmreq.getAttributes().add(new Attribute("dn",dn.getValues().get(0)));
+		SecretKey key = cfgMgr.getSecretKey(trust.getAccessLastmileKeyName());
+		String accessToken = null;
+		try {
+			accessToken = lmreq.generateLastMileToken(key);
+		} catch (Exception e) {
+			throw new ServletException("Could not generate access token",e);
+		}*/
+		
+		String accessToken = null;
+		try {
+			accessToken = this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization();
+		} catch (JoseException | LDAPException | ProvisioningException e1) {
+			throw new ServletException("Could not generate jwt",e1);
+		} 
+		
+		
+		
+		
+		
+		
+		OpenIDConnectAccessToken access = new OpenIDConnectAccessToken();
+		
+		access.setAccess_token(accessToken);
+		access.setExpires_in((int) (trust.getAccessTokenTimeToLive() / 1000));
+		try {
+			access.setId_token(this.produceJWT(this.generateClaims(dn.getValues().get(0),  cfgMgr, new URL(request.getRequestURL().toString()), trust,nonce),cfgMgr).getCompactSerialization());
+		} catch (Exception e) {
+			throw new ServletException("Could not generate JWT",e);
+		} 
+		
+		access.setToken_type("Bearer");
+		OIDCSession oidcSession = null;
+		
+		try {
+			oidcSession = this.storeSession(access,holder.getApp(),trust.getCodeLastmileKeyName(),request);
+		} catch (InvalidKeyException | NoSuchAlgorithmException | NoSuchPaddingException | IllegalBlockSizeException
+				| BadPaddingException e) {
+			throw new ServletException("Could not store session",e);
+		}
+		
+		
+		access.setRefresh_token(oidcSession.getEncryptedRefreshToken());
+		
+		Gson gson = new Gson();
+		String json = gson.toJson(access);
+		
+		response.setContentType("text/json");
+		response.getOutputStream().write(json.getBytes());
+		response.getOutputStream().flush();
 	}
 
 	public OIDCSession storeSession(OpenIDConnectAccessToken access,ApplicationType app,String codeTokenKeyName,HttpServletRequest request) throws InvalidKeyException, NoSuchAlgorithmException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, IOException {
@@ -444,38 +592,15 @@ public class OpenIDConnectIdP implements IdentityProvider {
 		session.setApplicationName(app.getName());
 		session.setSessionExpires(new Timestamp(new DateTime().plusSeconds(app.getCookieConfig().getTimeout()).getMillis()));
 		UUID refreshToken = UUID.randomUUID();
+		UUID userClientSecret = UUID.randomUUID();
+		
 		session.setRefreshToken(refreshToken.toString());
 		
-		byte[] bjson = refreshToken.toString().getBytes("UTF-8");
-		
-		Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-		cipher.init(Cipher.ENCRYPT_MODE, GlobalEntries.getGlobalEntries().getConfigManager().getSecretKey(codeTokenKeyName));
-		
-		byte[] encJson = cipher.doFinal(bjson);
-		String base64d = new String(org.bouncycastle.util.encoders.Base64.encode(encJson));
-		
-		Token token = new Token();
-		token.setEncryptedRequest(base64d);
-		token.setIv(new String(org.bouncycastle.util.encoders.Base64.encode(cipher.getIV())));
-		
-		
-		byte[] bxml = gson.toJson(token).getBytes("UTF-8");
-
-		ByteArrayOutputStream baos = new ByteArrayOutputStream();
-		
-		DeflaterOutputStream compressor  = new DeflaterOutputStream(baos,new Deflater(Deflater.BEST_COMPRESSION,true));
-		
-		compressor.write(bxml);
-		compressor.flush();
-		compressor.close();
-		
-		
-		
-		String b64 = new String( Base64.encode(baos.toByteArray()));
+		String b64 = encryptToken(codeTokenKeyName, gson, refreshToken);
 		
 		
 		session.setEncryptedRefreshToken(b64);
-		
+		session.setEncryptedClientSecret(this.encryptToken(codeTokenKeyName, gson, userClientSecret));
 		Session db = null;
 		try {
 			db = this.sessionFactory.openSession();
@@ -501,8 +626,56 @@ public class OpenIDConnectIdP implements IdentityProvider {
 		
 	}
 
+	
+	private String decryptToken(String codeTokenKeyName, Gson gson, String encrypted) throws Exception {
+		String inflated = this.inflate(encrypted);
+		Token token = gson.fromJson(inflated, Token.class);
+		
+		byte[] iv = org.bouncycastle.util.encoders.Base64.decode(token.getIv());
+		IvParameterSpec spec =  new IvParameterSpec(iv);
+		
+		Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+		cipher.init(Cipher.DECRYPT_MODE, GlobalEntries.getGlobalEntries().getConfigManager().getSecretKey(codeTokenKeyName),spec);
+		
+		byte[] decBytes = org.bouncycastle.util.encoders.Base64.decode(token.getEncryptedRequest());
+		
+		return new String(cipher.doFinal(decBytes));
+	}
+	
+	private String encryptToken(String codeTokenKeyName, Gson gson, UUID refreshToken)
+			throws UnsupportedEncodingException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException,
+			IllegalBlockSizeException, BadPaddingException, IOException {
+		byte[] bjson = refreshToken.toString().getBytes("UTF-8");
+		
+		Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+		cipher.init(Cipher.ENCRYPT_MODE, GlobalEntries.getGlobalEntries().getConfigManager().getSecretKey(codeTokenKeyName));
+		
+		byte[] encJson = cipher.doFinal(bjson);
+		String base64d = new String(org.bouncycastle.util.encoders.Base64.encode(encJson));
+		
+		Token token = new Token();
+		token.setEncryptedRequest(base64d);
+		token.setIv(new String(org.bouncycastle.util.encoders.Base64.encode(cipher.getIV())));
+		
+		
+		byte[] bxml = gson.toJson(token).getBytes("UTF-8");
+
+		ByteArrayOutputStream baos = new ByteArrayOutputStream();
+		
+		DeflaterOutputStream compressor  = new DeflaterOutputStream(baos,new Deflater(Deflater.BEST_COMPRESSION,true));
+		
+		compressor.write(bxml);
+		compressor.flush();
+		compressor.close();
+		
+		
+		
+		String b64 = new String( org.bouncycastle.util.encoders.Base64.encode(baos.toByteArray()));
+		return b64;
+	}
+
 	private String inflate(String saml) throws Exception {
-		byte[] compressedData = Base64.decode(saml);
+		byte[] compressedData = org.bouncycastle.util.encoders.Base64.decode(saml);
 		ByteArrayInputStream bin = new ByteArrayInputStream(compressedData);
 		
 		InflaterInputStream decompressor  = new InflaterInputStream(bin,new Inflater(true));
@@ -627,13 +800,13 @@ public class OpenIDConnectIdP implements IdentityProvider {
 		
 		DeflaterOutputStream compressor  = new DeflaterOutputStream(baos,new Deflater(Deflater.BEST_COMPRESSION,true));
 		
-		compressor.write(Base64.decode(codeToken.getBytes("UTF-8")));
+		compressor.write(org.bouncycastle.util.encoders.Base64.decode(codeToken.getBytes("UTF-8")));
 		compressor.flush();
 		compressor.close();
 		
 		
 		
-		String b64 = new String( Base64.encode(baos.toByteArray()));
+		String b64 = new String( org.bouncycastle.util.encoders.Base64.encode(baos.toByteArray()));
 		
 		
 		StringBuffer b = new StringBuffer();
@@ -988,6 +1161,32 @@ public class OpenIDConnectIdP implements IdentityProvider {
 			}
 		}
 		
+	}
+
+	public String decryptClientSecret(String keyName,String encryptedClientSecret) throws Exception {
+		return this.decryptToken(keyName, new Gson(), encryptedClientSecret);
+	}
+
+	public OIDCSession reloadSession(OIDCSession oidcSession) {
+		Session db = null;
+		try {
+			db = this.sessionFactory.openSession();
+			
+			//check to see if the object still exists
+			OIDCSession lsession = db.get(OIDCSession.class, oidcSession.getId());
+			return lsession;
+		} finally {
+			if (db != null) {
+				if (db.getTransaction() != null && db.getTransaction().isActive()) {
+					db.getTransaction().rollback();
+				}
+				db.close();
+			}
+		}
+	}
+
+	public String getJwtSigningKeyName() {
+		return this.jwtSigningKeyName;
 	}
 	
 	

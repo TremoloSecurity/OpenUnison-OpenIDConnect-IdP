@@ -14,7 +14,7 @@ package com.tremolosecurity.idp.providers;
 
 public class OpenIDConnectAccessToken {
 	String access_token;
-	String expires_in;
+	int expires_in;
 	String token_type;
 	String id_token;
 	String refresh_token;
@@ -31,11 +31,11 @@ public class OpenIDConnectAccessToken {
 		this.access_token = access_token;
 	}
 
-	public String getExpires_in() {
+	public int getExpires_in() {
 		return expires_in;
 	}
 
-	public void setExpires_in(String expires_in) {
+	public void setExpires_in(int expires_in) {
 		this.expires_in = expires_in;
 	}
 

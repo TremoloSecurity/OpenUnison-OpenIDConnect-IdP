@@ -30,10 +30,11 @@ public class OIDCSession {
 	private String accessToken;
 	private String idToken;
 	private String refreshToken;
-	private Timestamp idTokenExpires;
+	
 	private Timestamp sessionExpires;
 	private String applicationName;
 	private String encryptedRefreshToken;
+	private String encryptedClientSecret;
 	
 	@Id
 	@GeneratedValue(strategy=GenerationType.IDENTITY)
@@ -70,13 +71,7 @@ public class OIDCSession {
 		this.refreshToken = refreshToken;
 	}
 	
-	@Column(name = "idTokenExpires")
-	public Timestamp getIdTokenExpires() {
-		return idTokenExpires;
-	}
-	public void setIdTokenExpires(Timestamp idTokenExpires) {
-		this.idTokenExpires = idTokenExpires;
-	}
+	
 	
 	@Column(name = "sessionExpires")
 	public Timestamp getSessionExpires() {
@@ -100,6 +95,15 @@ public class OIDCSession {
 	}
 	public void setEncryptedRefreshToken(String encryptedRefreshToken) {
 		this.encryptedRefreshToken = encryptedRefreshToken;
+	}
+	
+	
+	@Column(name = "encryptedClientSecret",columnDefinition = "TEXT")
+	public String getEncryptedClientSecret() {
+		return encryptedClientSecret;
+	}
+	public void setEncryptedClientSecret(String encryptedClientSecret) {
+		this.encryptedClientSecret = encryptedClientSecret;
 	}
 	
 	
